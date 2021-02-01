@@ -1,0 +1,320 @@
+---
+title: Identifying the molecular mode of action of itraconazole in colorectal cancer
+  - Human
+output:
+  word_document: default
+  html_document:
+    df_print: paged
+  html_notebook: default
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE,message=FALSE,warning=FALSE)
+```
+
+# Introduction
+It is thought that treatments for colorectal cancer (CRC) are failing due to cellular dormancy. This dormancy allows the cancer cells to lie inactive while therapy is taking place, therefore meaning they are un-targeted. They can then re-enter the cell cycle, allowing them to multiply, leading to tumor recurrence. This study therefore aims to identify compounds which are able to target both dormant and cycling tumor cells, with a focus on exploring the use of itraconazole in the treatment of CRC. Itraconazole disruptions the WNT signaling pathway, which is known to play a role in cancer formation.  Two CRC cell lines were used, HT55 and SW948. These were then treated with itraconazole to examine its effects on gene expression, with DMSO used as a control. 
+
+# Import the data
+First, we need to import in all our raw data. This includes the gene ID's, sample information and the number of reads for each gene. 
+This was done by importing the metadata  and count data, in the form of salmon quant files, using the readr package. 
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+# initialise the readr library
+library(readr)
+# this reads in the gene ID's
+tx2gene <- read_csv("tx2gene.csv")
+# this reads in the sample information
+sampleinfo <- read.delim("meta_data/sampleInfo.txt")
+
+```
+
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+# dirs contains all the sample names and reads
+dirs <- list.files("salmon_quant/")
+quant_files <- list.files("salmon_quant/",pattern="quant.sf",recursive = TRUE,full.names = TRUE)
+
+names(quant_files) <- dirs
+```
+
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+# initialise the taximport library
+library(tximport)
+
+# ignoreTxVersion is required to make sure the transcript names match up
+# txi contains the sampleinfo and read counts
+txi <- tximport(quant_files,type="salmon",tx2gene = tx2gene,ignoreTxVersion = TRUE)
+```
+
+
+# Quality Assessment
+Quality assessment checks that all the data is as expected. This can be used to verify if the results are normally distributed, look for outliers and check that all the samples are labeled correctly.  
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+# initialise the DESeq library
+library(DESeq2)
+
+# here we create a dataset for our experimental data
+# the experimental design is set to condition
+dds <- DESeqDataSetFromTximport(txi, 
+                                colData = sampleinfo,
+                                design <- ~condition)
+```
+
+### Boxplot
+Boxplots can be used to visualise the data and check that the counts are normally distributed. Before creating the boxplot we need to do a log2 transformation to compensate for the effects of different library sizes. A boxplot can then be used to visualise the differences in distribution within the data.  
+
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+# take log2 counts to normalise the results.
+vsd <- rlog(dds,blind=TRUE)
+```
+
+```{r echo=FALSE,message=FALSE,warning=FALSE, fig.height=5}
+# check distributions of samples using boxplots
+boxplot(assay(vsd), xlab="", ylab="Log2 counts per million",las=2,main="Normalised Distributions")
+# adds a red horizontal line that shows the median results
+abline(h=median(assay(vsd)), col="red")
+```
+Figure 1: The boxplot shows that for each sample the medians are exceedingly similar, authenticating that the counts are normalised. 
+
+### Principal Component Analysis (PCA)
+Next, we can look at Principal Component Analysis (PCA). PCA is used to examine the samples in a 2D plane spanned by their first two principal components. The closer the data points are to each other the more similar the samples. This can be used to make sure the samples have been labeled correctly. 
+
+```{r echo=FALSE,message=FALSE,warning=FALSE, fig.width=10, fig.height=5}
+# initialise the ggrepel library
+library(ggrepel)
+# PCA plot with both the cell line and condition
+plotPCA(vsd,intgroup=c("cell_line", "condition")) + geom_text_repel(aes(label=name))
+```
+Figure 2: The PCA plot demonstrates that the samples are labeled correctly, as they can be seen within four distinct groups. The PCA plot also reveals that the two cell lines HT55 and SW948 are very diverse, it is therefore sensible to conduct differential expression and pathway analysis on these cell lines separately to compensate for any differences in their gene expression. 
+
+# Differential Expression
+Deferential expression is used to examine which genes are deferentially expressed between the different conditions DMSO and itraconazole within the two cell lines HT55 and SW948.
+DESeq is a library which can be used to analyse count data from high-throughput sequencing analysis. It can therefore be used here to calculate fold change and significance within the count data. 
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+# initialise dyplr
+library(dplyr)
+# this takes our dataset and performs the DESeq analysis
+de_condition <- DESeq(dds)
+results_condition <- results(de_condition) %>%
+  as.data.frame %>% 
+  tibble::rownames_to_column("ENSEMBL")  
+```
+
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+# initialise org.Hs.eg.db which contains human gene information
+library(org.Hs.eg.db)
+# anno contains extra information for the genes from org.Hs.eg.db
+anno <- AnnotationDbi::select(org.Hs.eg.db,keys=results_condition$ENSEMBL,
+              columns=c("ENSEMBL","SYMBOL","GENENAME","ENTREZID"),
+              keytype="ENSEMBL") %>% 
+  filter(!duplicated(ENSEMBL))
+# join together our DESeq analysis to the annotated table
+results_annotated <- left_join(results_condition, anno,by="ENSEMBL") %>% 
+  arrange(padj) %>%
+  mutate(Significant = padj < 0.05 & abs(log2FoldChange) > 2)
+```
+
+### HT55 Cell line
+First, we can analyse and visualise the differential expression for the HT55 cell line by creating a subgroup for this data. DESeq analysis can then be performed on this subset to identify significantly expressed genes.
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+## create subset corresponding to HT55
+dds_HT55 <- dds[,which(dds$cell_line == "HT55")]
+dds_HT55$Status <- as.factor(dds_HT55$condition)
+design(dds_HT55) <- ~condition
+## perform DESeq analysis
+de_HT55 <- DESeq(dds_HT55)
+```
+
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+# initialise flextable
+library(flextable)
+# takes the results from the DESeq analysis
+results_HT55 <- results(de_HT55) %>%
+  as.data.frame %>% 
+  tibble::rownames_to_column("ENSEMBL")
+```
+```{r}
+# combines the results from the DESeq analysis to the annotated table
+results_HT55_anno <- left_join(results_HT55, anno,by="ENSEMBL") %>% 
+  arrange(padj) %>%
+  mutate(Significant = padj < 0.05 & abs(log2FoldChange) > 2)
+# uses flextable to create a table of results
+table_ht55 <- flextable(head(results_HT55_anno))
+table_ht55 <- theme_box(table_ht55)
+table_ht55
+```
+Figure 3: Table of results for the HT55 cell line with the six most differentially expressed genes, with SLC26A3 being the most differentially expressed.
+
+
+### HT55 Volcano Plot
+The results can then be visualised using a volcano plot. This is a scatter plot which shows the significance and the magnitude of difference between our conditions. It plots a single point for each gene, this can be used to identify which genes are the most significant. In this volcano plot we have labeled the 10 most significantly expressed genes. 
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+# creates a variable top_genes which contains the 10 most differnetially expressed genes
+N <- 10
+top_genes <- results_HT55_anno$ENSEMBL[1:N]
+# creates a volcano plot for the HT55 cell line in which the top genes are annotated
+results_HT55_anno %>% 
+  mutate(Label = ifelse(ENSEMBL %in% top_genes, SYMBOL, "")) %>%  
+  ggplot(aes(x = log2FoldChange, y = -log10(padj), label=Label, col=Significant)) + geom_point(alpha=0.4) + geom_text_repel(col="red") + scale_color_manual(breaks = c("TRUE", "FALSE"),values=c("red", "black"))
+```
+Figure 4: Volcano plot for the HT55 cell line. The x-axis demonstrates the fold change, anything with a negative fold change is less expressed in the treated group vs untreated. Anything with a positive fold change is more expressed in the treated group. This shows that genes such as AKR1C1 and IGFL2-AS1 are highly expressed in the group treated with itraconazole. In addition, it can be seen that SLC26A3 is very significantly expressed.
+
+
+### HT55 Heatmap.
+Heatmaps are also a useful tool to visualise differential expression. Here we created a heatmap using the top 10 significant genes for HT55. The patches indicate the levels of expression of a specific gene in each sample (dark red being very highly expressed and dark blue indicating very low expression). This was done using the pheatmap library.
+```{r}
+# vds contains our normalised count data
+vds_HT55 <- vst(dds_HT55)
+# initialise pheatmap
+library(pheatmap)
+symbols <- results_HT55_anno$SYMBOL[1:N]
+sampleInfo <- as.data.frame(colData(dds)[,c("cell_line", "condition")])
+# creates a heatmap from the normalised count data
+pheatmap(assay(vds_HT55)[top_genes,],
+         annotation_col = sampleInfo, labels_row = symbols) 
+```
+Figure 5: From the heatmap we can interpret that SLC26A3 has a very high expression in the itraconazole treated group when compared to the DMSO control. AKR1C1 and IGFL2-AS1 have very low expression levels in the control which is then increased when treated with itraconazole.  
+
+### SW948 Cell Line
+We can then create a separate dataset for the SW948 cell line and compare the gene expression for the treated and untreated groups. 
+
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+## create subset corresponding to SW948
+dds_SW948 <- dds[,which(dds$cell_line == "SW948")]
+dds_SW948$Status <- as.factor(dds_SW948$condition)
+design(dds_SW948) <- ~condition
+## perform analysis
+de_SW948 <- DESeq(dds_SW948)
+```
+
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+# this then takes the results from our DESeq analysis
+results_sw948 <- results(de_SW948) %>%
+  as.data.frame %>% 
+  tibble::rownames_to_column("ENSEMBL")
+```
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+#results from the DESeq analysis are joined to the annotated table
+results_SW948_anno <- left_join(results_sw948, anno,by="ENSEMBL") %>% 
+  arrange(padj) %>%
+  mutate(Significant = padj < 0.05 & abs(log2FoldChange) > 2)
+# uses flextable to create a table of results
+table_SW948 <- flextable(head(results_SW948_anno))
+table_SW948 <- theme_box(table_SW948)
+table_SW948
+```
+Figure 6: This table demonstrates results for the SW948 cell line for the six most differentially expressed genes, with MSMO1 being the most differentially expressed.
+
+
+### SW948 Volcano Plot
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+# creates a volcano plot with the top 10 differentially expressed genes labelled. 
+N <- 10
+top_genes <- results_SW948_anno$ENSEMBL[1:N]
+results_SW948_anno %>% 
+  mutate(Label = ifelse(ENSEMBL %in% top_genes, SYMBOL, "")) %>%  
+  ggplot(aes(x = log2FoldChange, y = -log10(padj), label=Label, col=Significant)) + geom_point(alpha=0.4) + geom_text_repel(col="red") + scale_color_manual(breaks = c("TRUE", "FALSE"),values=c("red", "black"))
+```
+Figure 7: For the SW948 cell line, we can see from the volcano plot that genes such as MSM01, INSIG1 and ALDOC have significantly high expression in the treated groups. On the other hand, ERN2 has very low expression. This can also be seen when looking at the differences in expression in the heatmap. 
+
+
+### SW948 Heatmap
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+# normalised count data for the SW948 cell line
+vds_SW948 <- vst(dds_SW948)
+
+symbols <- results_SW948_anno$SYMBOL[1:N]
+sampleInfo <- as.data.frame(colData(dds)[,c("cell_line", "condition")])
+# creates a heatmap from the normalised count data
+pheatmap(assay(vds_SW948)[top_genes,],
+         annotation_col = sampleInfo, labels_row = symbols) 
+```
+Figure 8: The heatmap reveals that INSIG1 has very high expression in the treated group, compared to middling expression in the control. ERN2 on the other hand has a very low expression when treated with itraconazole. 
+
+### Venn Diagram
+We can then use a Venn Diagram to visualise overlapping differential gene expression between the two cell lines. 
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+# creates a venn diagram from the DESeq results from HT55 and SW948
+venn_data <- data.frame(HT55 = results_HT55$padj<0.05,
+                        SW948 = results_sw948$padj < 0.05)
+library(limma)
+vennDiagram(venn_data)
+```
+Figure 9: The Venn diagram shows that more genes were deferentially expressed in the SW948 cell line than in HT55,indicating that itraconazole had a greater effect on SW948.
+
+# Pathway Analysis
+We can then follow up our differential gene expression with pathway analysis. This allows us to identify any pathways or mechanisms which may be altered with itraconazole treatment, which may reveal any biological significance. 
+
+The package clusterProfiler is used for enrichment analysis and can therefore be used here to identify significant pathways. We should also conduct this on our cell lines separately to compensate for any differences in gene expression between them. 
+
+### HT55 Gene Enrichment Analysis
+We can create a dotplot which shows the normalised gene ratio for each pathway. This identifies which pathways are the most deferentially expressed between the two conditions. The larger the dots the higher the gene count for that pathway. Red dots indicate higher significance in gene expression, whereas blue shows lower significance.  
+This is done on the HT55 cell line first. 
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+# initialise clusterProfiler
+library(clusterProfiler)
+universe <- results_HT55_anno %>% pull(ENTREZID)
+sigGenes <- results_HT55_anno %>% 
+  filter(padj < 0.05, !is.na(ENTREZID)) %>% pull(ENTREZID)
+
+# creates a variable with the enrichment analysis information for the HT55 line
+enrich_go_HT55 <- enrichGO(
+  gene= sigGenes,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP",
+  universe = universe,
+  qvalueCutoff = 0.05,
+  readable=TRUE
+)
+```
+
+
+```{r echo=FALSE,message=FALSE,warning=FALSE, fig.width=10}
+# uses the enrichment analysis to plot a dotplot
+dotplot(enrich_go_HT55)
+```
+Figure 10: Dotplot for the HT55 cell line. Pathways such as neutrophil activation and proteasomal protein catabolic processes have a high proportion of significant genes, indicating that itraconazole treatment may affected these pathways in the HT55 line.
+
+### HT55 Gene Ontology Directed Acyclic Graph (GO DAG)
+We can also examine how these pathways interact with each other. This is done by creating a GO DAG graph, which shows pathway relationships and hierarchy. 
+```{r echo=FALSE,message=FALSE,warning=FALSE, fig.width=15, fig.height=10}
+# initialise enrichplot
+library(enrichplot)
+# uses the enrichment analysis to plot a GO DAG plot
+goplot(enrich_go_HT55, showCategory = 5)
+```
+Figure 11: GO DAG plot shows the hierarchy which links the most significant pathways together in the HT55 cell line, illustrating how the cellular and metabolic processes interact with each other. 
+
+### SW948 Gene Enrichment Analysis
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+universe <- results_SW948_anno %>% pull(ENTREZID)
+sigGenes <- results_SW948_anno %>% 
+  filter(padj < 0.05, !is.na(ENTREZID)) %>% pull(ENTREZID)
+
+# variable containing the enrichment analysis for the SW948 cell line
+enrich_go_SW948 <- enrichGO(
+  gene= sigGenes,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP",
+  universe = universe,
+  qvalueCutoff = 0.05,
+  readable=TRUE
+)
+```
+
+
+```{r echo=FALSE,message=FALSE,warning=FALSE, fig.width=10}
+# uses the enrichment analysis to plot a dotplot
+dotplot(enrich_go_SW948) + theme(axis.text.y = element_text(size = 10))
+```
+Figure 12: The dotplot for the SW849 indicates that ncRNA metabolic reactions and proteasomal protein catabolic processes may be altered by itraconazole treatment.
+
+Interestingly, proteasomal protein catabolic processes appear to have been greatly altered in both cell lines by itraconazole, which may be biologically significant.
+
+### SW948 Gene Ontology Directed Acyclic Graph (GO DAG)
+```{r echo=FALSE,message=FALSE,warning=FALSE, fig.width=15, fig.height=20}
+# uses the enrichment analysis to plot a GO DAG plot
+goplot(enrich_go_SW948, showCategory = 5)
+```
+Figure 13: The pathway hierarchy for SW948 appears more complex than that for the HT55 cell line. This demonstrates the intricate interactions between different pathways which may be altered by itraconazole treatment. 
+
